@@ -82,12 +82,21 @@ export function ExportDeployView({ workspaceState }: ExportDeployViewProps) {
   } | null>(null);
   const [vercelError, setVercelError] = useState<string | null>(null);
 
+  const [ghShowHelp, setGhShowHelp] = useState(false);
+  const [ghPatInput, setGhPatInput] = useState('');
+  const [ghPatSubmitting, setGhPatSubmitting] = useState(false);
+
+  const [vercelShowHelp, setVercelShowHelp] = useState(false);
+  const [vercelPatInput, setVercelPatInput] = useState('');
+  const [vercelPatSubmitting, setVercelPatSubmitting] = useState(false);
+
   const [copiedField, setCopiedField] = useState<string | null>(null);
 
   const refreshStatuses = useCallback(async () => {
     try {
+      const originParam = encodeURIComponent(window.location.origin);
       const [mRes, ghRes, vRes] = await Promise.all([
-        fetch('/api/export/manifest'),
+        fetch(`/api/export/manifest?origin=${originParam}`),
         fetch('/api/github/status'),
         fetch('/api/vercel/status'),
       ]);
@@ -185,7 +194,8 @@ export function ExportDeployView({ workspaceState }: ExportDeployViewProps) {
   const handleConnectGitHub = async () => {
     setGhError(null);
     try {
-      const res = await fetch('/api/auth/github/url');
+      const originParam = encodeURIComponent(window.location.origin);
+      const res = await fetch(`/api/auth/github/url?origin=${originParam}`);
       const data = (await res.json()) as { url?: string; error?: string };
       if (!res.ok || !data.url) {
         throw new Error(data.error ?? '無法取得 GitHub OAuth 連結');
@@ -196,6 +206,31 @@ export function ExportDeployView({ workspaceState }: ExportDeployViewProps) {
       }
     } catch (error) {
       setGhError(error instanceof Error ? error.message : '連結 GitHub 失敗');
+    }
+  };
+
+  const handleConnectGitHubPat = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!ghPatInput.trim()) return;
+    setGhPatSubmitting(true);
+    setGhError(null);
+    try {
+      const res = await fetch('/api/github/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: ghPatInput.trim() }),
+      });
+      const data = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error ?? 'GitHub Token 驗證失敗');
+      }
+      setGhPatInput('');
+      setGhShowHelp(false);
+      await refreshStatuses();
+    } catch (error) {
+      setGhError(error instanceof Error ? error.message : 'GitHub Token 連線失敗');
+    } finally {
+      setGhPatSubmitting(false);
     }
   };
 
@@ -244,7 +279,8 @@ export function ExportDeployView({ workspaceState }: ExportDeployViewProps) {
   const handleConnectVercel = async () => {
     setVercelError(null);
     try {
-      const res = await fetch('/api/auth/vercel/url');
+      const originParam = encodeURIComponent(window.location.origin);
+      const res = await fetch(`/api/auth/vercel/url?origin=${originParam}`);
       const data = (await res.json()) as { url?: string; error?: string };
       if (!res.ok || !data.url) {
         throw new Error(data.error ?? '無法取得 Vercel OAuth 連結');
@@ -255,6 +291,31 @@ export function ExportDeployView({ workspaceState }: ExportDeployViewProps) {
       }
     } catch (error) {
       setVercelError(error instanceof Error ? error.message : '連結 Vercel 失敗');
+    }
+  };
+
+  const handleConnectVercelPat = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!vercelPatInput.trim()) return;
+    setVercelPatSubmitting(true);
+    setVercelError(null);
+    try {
+      const res = await fetch('/api/vercel/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: vercelPatInput.trim() }),
+      });
+      const data = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error ?? 'Vercel Token 驗證失敗');
+      }
+      setVercelPatInput('');
+      setVercelShowHelp(false);
+      await refreshStatuses();
+    } catch (error) {
+      setVercelError(error instanceof Error ? error.message : 'Vercel Token 連線失敗');
+    } finally {
+      setVercelPatSubmitting(false);
     }
   };
 
@@ -426,14 +487,72 @@ export function ExportDeployView({ workspaceState }: ExportDeployViewProps) {
               </div>
             </div>
           ) : !ghStatus.connected ? (
-            <button
-              type="button"
-              onClick={handleConnectGitHub}
-              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors"
-            >
-              <GitBranch className="w-4 h-4" />
-              授權連結 GitHub 帳號
-            </button>
+            <div className="space-y-2.5">
+              <button
+                type="button"
+                onClick={handleConnectGitHub}
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors"
+              >
+                <GitBranch className="w-4 h-4" />
+                授權連結 GitHub 帳號
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setGhShowHelp((v) => !v)}
+                className="w-full text-center text-xs text-slate-500 hover:text-slate-900 underline"
+              >
+                {ghShowHelp
+                  ? '收合 Callback URL 與 Token 連線選項'
+                  : '遇到 redirect URL 無效？檢視 Callback URL 或改用 Token'}
+              </button>
+
+              {ghShowHelp && (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2.5 text-xs text-slate-600">
+                  <div className="space-y-1">
+                    <p className="font-semibold text-slate-800">GitHub OAuth Callback URL：</p>
+                    <div className="flex items-center gap-1.5">
+                      <code className="flex-1 px-2 py-1 bg-white border border-slate-200 rounded font-mono text-[11px] truncate">
+                        {manifest?.githubCallbackUrl ?? ''}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => handleCopy('gh-cb-2', manifest?.githubCallbackUrl ?? '')}
+                        className="p-1.5 bg-white border border-slate-200 rounded hover:bg-slate-100 shrink-0"
+                        aria-label="複製 GitHub Callback URL"
+                      >
+                        {copiedField === 'gh-cb-2' ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-600" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                  <form onSubmit={handleConnectGitHubPat} className="space-y-1.5 pt-1 border-t border-slate-200">
+                    <label className="block font-semibold text-slate-800">
+                      或使用 GitHub Personal Access Token（免設 Callback）：
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="password"
+                        value={ghPatInput}
+                        onChange={(e) => setGhPatInput(e.target.value)}
+                        placeholder="ghp_... (需具備 repo 權限)"
+                        className="flex-1 px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-200 rounded-md"
+                      />
+                      <button
+                        type="submit"
+                        disabled={ghPatSubmitting}
+                        className="px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md whitespace-nowrap disabled:opacity-50"
+                      >
+                        {ghPatSubmitting ? '驗證中...' : '連線'}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              )}
+            </div>
           ) : (
             <form onSubmit={handlePushToGitHub} className="space-y-3.5">
               <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
@@ -609,14 +728,74 @@ export function ExportDeployView({ workspaceState }: ExportDeployViewProps) {
               </a>
             </div>
           ) : !vercelStatus.connected ? (
-            <button
-              type="button"
-              onClick={handleConnectVercel}
-              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors"
-            >
-              <Rocket className="w-4 h-4" />
-              授權連結 Vercel 帳號
-            </button>
+            <div className="space-y-2.5">
+              <button
+                type="button"
+                onClick={handleConnectVercel}
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors"
+              >
+                <Rocket className="w-4 h-4" />
+                授權連結 Vercel 帳號
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setVercelShowHelp((v) => !v)}
+                className="w-full text-center text-xs text-slate-500 hover:text-slate-900 underline"
+              >
+                {vercelShowHelp
+                  ? '收合 Callback URL 與 Token 連線選項'
+                  : '出現 redirect URL is invalid？複製 Callback URL 或改用 Token'}
+              </button>
+
+              {vercelShowHelp && (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2.5 text-xs text-slate-600">
+                  <div className="space-y-1">
+                    <p className="font-semibold text-slate-800">
+                      請將此網址加入 Vercel App 的 Authorization Callback URLs：
+                    </p>
+                    <div className="flex items-center gap-1.5">
+                      <code className="flex-1 px-2 py-1 bg-white border border-slate-200 rounded font-mono text-[11px] truncate">
+                        {manifest?.vercelCallbackUrl ?? ''}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => handleCopy('vc-cb-2', manifest?.vercelCallbackUrl ?? '')}
+                        className="p-1.5 bg-white border border-slate-200 rounded hover:bg-slate-100 shrink-0"
+                        aria-label="複製 Vercel Callback URL"
+                      >
+                        {copiedField === 'vc-cb-2' ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-600" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                  <form onSubmit={handleConnectVercelPat} className="space-y-1.5 pt-1 border-t border-slate-200">
+                    <label className="block font-semibold text-slate-800">
+                      或貼上 Vercel Access Token 直接部署（vercel.com/account/tokens）：
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="password"
+                        value={vercelPatInput}
+                        onChange={(e) => setVercelPatInput(e.target.value)}
+                        placeholder="貼上 Vercel Token..."
+                        className="flex-1 px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-200 rounded-md"
+                      />
+                      <button
+                        type="submit"
+                        disabled={vercelPatSubmitting}
+                        className="px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md whitespace-nowrap disabled:opacity-50"
+                      >
+                        {vercelPatSubmitting ? '驗證中...' : '連線'}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              )}
+            </div>
           ) : (
             <form onSubmit={handleDeployToVercel} className="space-y-3.5">
               <div className="space-y-1">

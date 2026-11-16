@@ -1,4 +1,5 @@
 import type { Express, Request, Response } from 'express';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import JSZip from 'jszip';
@@ -29,6 +30,31 @@ export interface CollectedFile {
   buffer: Buffer;
 }
 
+interface PendingOAuthFlow {
+  redirectUri: string;
+  codeVerifier?: string;
+  createdAt: number;
+}
+
+const pendingOAuthFlows = new Map<string, PendingOAuthFlow>();
+
+function prunePendingOAuthFlows() {
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  for (const [key, value] of pendingOAuthFlows.entries()) {
+    if (value.createdAt < cutoff) {
+      pendingOAuthFlows.delete(key);
+    }
+  }
+}
+
+function toBase64Url(buf: Buffer): string {
+  return buf
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -47,6 +73,28 @@ function getAppBaseUrl(): string {
     return `https://${vercelUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')}`;
   }
   return 'http://localhost:3000';
+}
+
+function resolveAllowedOrigin(rawOrigin: unknown): string {
+  const fallback = getAppBaseUrl();
+  if (typeof rawOrigin === 'string' && rawOrigin.trim()) {
+    try {
+      const parsed = new URL(rawOrigin.trim());
+      const host = parsed.hostname.toLowerCase();
+      if (
+        parsed.origin === fallback ||
+        (parsed.protocol === 'https:' &&
+          (host.endsWith('.run.app') || host.endsWith('.vercel.app'))) ||
+        ((parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+          (host === 'localhost' || host === '127.0.0.1'))
+      ) {
+        return parsed.origin;
+      }
+    } catch {
+      // Ignore malformed origin
+    }
+  }
+  return fallback;
 }
 
 function generateDeployReadme(): string {
@@ -113,11 +161,11 @@ function getCookieOptions() {
 
 export function registerExportAndDeployRoutes(app: Express, rootDir: string) {
   // 1. Export Manifest & OAuth Callback Diagnostics
-  app.get('/api/export/manifest', async (_req: Request, res: Response) => {
+  app.get('/api/export/manifest', async (req: Request, res: Response) => {
     try {
       const files = await collectProjectFiles(rootDir);
       const totalBytes = files.reduce((sum, f) => sum + f.buffer.byteLength, 0);
-      const baseUrl = getAppBaseUrl();
+      const baseUrl = resolveAllowedOrigin(req.query.origin);
 
       res.json({
         fileCount: files.length,
@@ -167,28 +215,52 @@ export function registerExportAndDeployRoutes(app: Express, rootDir: string) {
   });
 
   // 3. GitHub OAuth Routes
-  app.get('/api/auth/github/url', (_req: Request, res: Response) => {
+  app.get('/api/auth/github/url', (req: Request, res: Response) => {
     const clientId = process.env.GITHUB_CLIENT_ID;
     const clientSecret = process.env.GITHUB_CLIENT_SECRET;
     if (!clientId || !clientSecret) {
       res.status(503).json({
-        error: '尚未於環境設定 GITHUB_CLIENT_ID 與 GITHUB_CLIENT_SECRET，請先完成 GitHub OAuth App 綁定。',
+        error: '尚未於環境設定 GITHUB_CLIENT_ID 與 GITHUB_CLIENT_SECRET，請先完成 GitHub OAuth App 綁定或改用 Personal Access Token。',
       });
       return;
     }
 
-    const redirectUri = `${getAppBaseUrl()}/auth/github/callback`;
+    prunePendingOAuthFlows();
+    const baseUrl = resolveAllowedOrigin(req.query.origin);
+    const redirectUri = `${baseUrl}/auth/github/callback`;
+    const state = toBase64Url(crypto.randomBytes(18));
+    pendingOAuthFlows.set(state, { redirectUri, createdAt: Date.now() });
+
     const params = new URLSearchParams({
       client_id: clientId,
       redirect_uri: redirectUri,
       scope: 'repo read:user',
+      state,
     });
 
-    res.json({ url: `https://github.com/login/oauth/authorize?${params.toString()}` });
+    res.json({
+      url: `https://github.com/login/oauth/authorize?${params.toString()}`,
+      redirectUri,
+    });
   });
 
   const handleGitHubCallback = async (req: Request, res: Response) => {
+    const oauthError =
+      typeof req.query.error_description === 'string'
+        ? req.query.error_description
+        : typeof req.query.error === 'string'
+        ? req.query.error
+        : '';
+    if (oauthError) {
+      res.status(400).send(`<p>GitHub 授權失敗：${oauthError}</p>`);
+      return;
+    }
+
     const code = typeof req.query.code === 'string' ? req.query.code : '';
+    const state = typeof req.query.state === 'string' ? req.query.state : '';
+    const flow = state ? pendingOAuthFlows.get(state) : undefined;
+    if (state) pendingOAuthFlows.delete(state);
+
     const clientId = process.env.GITHUB_CLIENT_ID;
     const clientSecret = process.env.GITHUB_CLIENT_SECRET;
 
@@ -196,6 +268,8 @@ export function registerExportAndDeployRoutes(app: Express, rootDir: string) {
       res.status(400).send('<p>GitHub OAuth 授權參數不完整。</p>');
       return;
     }
+
+    const redirectUri = flow?.redirectUri ?? `${getAppBaseUrl()}/auth/github/callback`;
 
     try {
       const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
@@ -208,7 +282,7 @@ export function registerExportAndDeployRoutes(app: Express, rootDir: string) {
           client_id: clientId,
           client_secret: clientSecret,
           code,
-          redirect_uri: `${getAppBaseUrl()}/auth/github/callback`,
+          redirect_uri: redirectUri,
         }),
       });
 
@@ -239,6 +313,34 @@ export function registerExportAndDeployRoutes(app: Express, rootDir: string) {
   };
 
   app.get(['/auth/github/callback', '/auth/github/callback/'], handleGitHubCallback);
+
+  app.post('/api/github/token', async (req: Request, res: Response) => {
+    const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+    if (!token) {
+      res.status(400).json({ error: '請輸入有效的 GitHub Personal Access Token。' });
+      return;
+    }
+    try {
+      const userRes = await fetch('https://api.github.com/user', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'RelayFlow-Exporter',
+        },
+      });
+      if (!userRes.ok) {
+        res.status(401).json({ error: 'GitHub Token 驗證失敗或權限不足（需具備 repo 權限）。' });
+        return;
+      }
+      const data = (await userRes.json()) as { login?: string };
+      res.cookie('rf_github_token', token, getCookieOptions());
+      res.json({ ok: true, username: data.login ?? 'github-user' });
+    } catch (error) {
+      res.status(500).json({
+        error: error instanceof Error ? error.message : '驗證 GitHub Token 失敗',
+      });
+    }
+  });
 
   app.get('/api/github/status', async (req: Request, res: Response) => {
     const token = req.cookies?.rf_github_token as string | undefined;
@@ -545,26 +647,63 @@ export function registerExportAndDeployRoutes(app: Express, rootDir: string) {
   });
 
   // 5. Vercel OAuth Routes & Direct Deployment API
-  app.get('/api/auth/vercel/url', (_req: Request, res: Response) => {
+  app.get('/api/auth/vercel/url', (req: Request, res: Response) => {
     const clientId = process.env.VERCEL_CLIENT_ID;
     const clientSecret = process.env.VERCEL_CLIENT_SECRET;
     if (!clientId || !clientSecret) {
       res.status(503).json({
-        error: '尚未於環境設定 VERCEL_CLIENT_ID 與 VERCEL_CLIENT_SECRET；您仍可使用 Push 到 GitHub 後的「一鍵匯入 Vercel」按鈕。',
+        error: '尚未於環境設定 VERCEL_CLIENT_ID 與 VERCEL_CLIENT_SECRET；您仍可使用「Personal Access Token」或 Push 到 GitHub 後的「一鍵匯入 Vercel」按鈕。',
       });
       return;
     }
 
-    const redirectUri = `${getAppBaseUrl()}/auth/vercel/callback`;
+    prunePendingOAuthFlows();
+    const baseUrl = resolveAllowedOrigin(req.query.origin);
+    const redirectUri = `${baseUrl}/auth/vercel/callback`;
+    const state = toBase64Url(crypto.randomBytes(18));
+
     const params = new URLSearchParams({
       client_id: clientId,
       redirect_uri: redirectUri,
+      response_type: 'code',
+      state,
     });
-    res.json({ url: `https://vercel.com/oauth/authorize?${params.toString()}` });
+
+    if (clientId.startsWith('cl_')) {
+      const codeVerifier = toBase64Url(crypto.randomBytes(32));
+      const codeChallenge = toBase64Url(
+        crypto.createHash('sha256').update(codeVerifier).digest()
+      );
+      params.set('code_challenge', codeChallenge);
+      params.set('code_challenge_method', 'S256');
+      pendingOAuthFlows.set(state, { redirectUri, codeVerifier, createdAt: Date.now() });
+    } else {
+      pendingOAuthFlows.set(state, { redirectUri, createdAt: Date.now() });
+    }
+
+    res.json({
+      url: `https://vercel.com/oauth/authorize?${params.toString()}`,
+      redirectUri,
+    });
   });
 
   const handleVercelCallback = async (req: Request, res: Response) => {
+    const oauthError =
+      typeof req.query.error_description === 'string'
+        ? req.query.error_description
+        : typeof req.query.error === 'string'
+        ? req.query.error
+        : '';
+    if (oauthError) {
+      res.status(400).send(`<p>Vercel 授權失敗：${oauthError}</p>`);
+      return;
+    }
+
     const code = typeof req.query.code === 'string' ? req.query.code : '';
+    const state = typeof req.query.state === 'string' ? req.query.state : '';
+    const flow = state ? pendingOAuthFlows.get(state) : undefined;
+    if (state) pendingOAuthFlows.delete(state);
+
     const clientId = process.env.VERCEL_CLIENT_ID;
     const clientSecret = process.env.VERCEL_CLIENT_SECRET;
 
@@ -573,15 +712,27 @@ export function registerExportAndDeployRoutes(app: Express, rootDir: string) {
       return;
     }
 
+    const redirectUri = flow?.redirectUri ?? `${getAppBaseUrl()}/auth/vercel/callback`;
+    const isModernVercelApp = clientId.startsWith('cl_');
+    const tokenEndpoint = isModernVercelApp
+      ? 'https://api.vercel.com/login/oauth/token'
+      : 'https://api.vercel.com/v2/oauth/access_token';
+
     try {
       const formBody = new URLSearchParams({
         client_id: clientId,
         client_secret: clientSecret,
         code,
-        redirect_uri: `${getAppBaseUrl()}/auth/vercel/callback`,
+        redirect_uri: redirectUri,
       });
+      if (isModernVercelApp) {
+        formBody.set('grant_type', 'authorization_code');
+        if (flow?.codeVerifier) {
+          formBody.set('code_verifier', flow.codeVerifier);
+        }
+      }
 
-      const tokenRes = await fetch('https://api.vercel.com/v2/oauth/access_token', {
+      const tokenRes = await fetch(tokenEndpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: formBody.toString(),
@@ -589,9 +740,12 @@ export function registerExportAndDeployRoutes(app: Express, rootDir: string) {
       const tokenData = (await tokenRes.json()) as {
         access_token?: string;
         error_description?: string;
+        error?: string;
       };
       if (!tokenData.access_token) {
-        throw new Error(tokenData.error_description ?? 'Vercel Token 交換失敗');
+        throw new Error(
+          tokenData.error_description ?? tokenData.error ?? 'Vercel Token 交換失敗'
+        );
       }
 
       res.cookie('rf_vercel_token', tokenData.access_token, getCookieOptions());
@@ -613,6 +767,30 @@ export function registerExportAndDeployRoutes(app: Express, rootDir: string) {
   };
 
   app.get(['/auth/vercel/callback', '/auth/vercel/callback/'], handleVercelCallback);
+
+  app.post('/api/vercel/token', async (req: Request, res: Response) => {
+    const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+    if (!token) {
+      res.status(400).json({ error: '請輸入有效的 Vercel Access Token。' });
+      return;
+    }
+    try {
+      const userRes = await fetch('https://api.vercel.com/v2/user', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!userRes.ok) {
+        res.status(401).json({ error: 'Vercel Token 驗證失敗，請確認 Token 有效且尚未過期。' });
+        return;
+      }
+      const data = (await userRes.json()) as { user?: { username?: string } };
+      res.cookie('rf_vercel_token', token, getCookieOptions());
+      res.json({ ok: true, username: data.user?.username ?? 'vercel-user' });
+    } catch (error) {
+      res.status(500).json({
+        error: error instanceof Error ? error.message : '驗證 Vercel Token 失敗',
+      });
+    }
+  });
 
   app.get('/api/vercel/status', async (req: Request, res: Response) => {
     const token = req.cookies?.rf_vercel_token as string | undefined;
