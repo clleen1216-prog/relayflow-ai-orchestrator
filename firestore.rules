@@ -1,0 +1,211 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedOwner(userId) {
+      return isSignedIn()
+        && request.auth.uid == userId
+        && request.auth.token.email_verified == true;
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'createdAt', 'updatedAt'])
+        && data.uid is string
+        && isValidId(data.uid)
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 254
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 120
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWorkspace(data, userId) {
+      return data.keys().hasAll([
+          'ownerId',
+          'currentDate',
+          'routingMode',
+          'dailyTimeBudgetMinutes',
+          'tools',
+          'tasks',
+          'carryoverLogs',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'currentDate',
+          'routingMode',
+          'dailyTimeBudgetMinutes',
+          'tools',
+          'tasks',
+          'carryoverLogs',
+          'updatedAt'
+        ])
+        && data.ownerId is string
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.currentDate is string
+        && data.currentDate.size() >= 8
+        && data.currentDate.size() <= 20
+        && data.routingMode in ['strength_first', 'quota_balanced', 'urgency_first']
+        && data.dailyTimeBudgetMinutes is int
+        && data.dailyTimeBudgetMinutes >= 30
+        && data.dailyTimeBudgetMinutes <= 720
+        && data.tools is list
+        && data.tools.size() <= 50
+        && (data.tools.size() == 0 || data.tools[0] is map)
+        && data.tasks is list
+        && data.tasks.size() <= 100
+        && (data.tasks.size() == 0 || data.tasks[0] is map)
+        && data.carryoverLogs is list
+        && data.carryoverLogs.size() <= 100
+        && (data.carryoverLogs.size() == 0 || data.carryoverLogs[0] is map)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLinkedAccount(data, userId, accountId) {
+      return data.keys().hasAll([
+          'id',
+          'ownerId',
+          'label',
+          'emailAlias',
+          'toolIds',
+          'notes',
+          'enabled',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'ownerId',
+          'label',
+          'emailAlias',
+          'toolIds',
+          'notes',
+          'enabled',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.id is string
+        && isValidId(data.id)
+        && data.id == accountId
+        && data.ownerId is string
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.label is string
+        && data.label.size() >= 1
+        && data.label.size() <= 80
+        && data.emailAlias is string
+        && data.emailAlias.size() >= 1
+        && data.emailAlias.size() <= 160
+        && data.toolIds is list
+        && data.toolIds.size() >= 1
+        && data.toolIds.size() <= 30
+        && data.toolIds[0] is string
+        && data.notes is string
+        && data.notes.size() <= 300
+        && data.enabled is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isVerifiedOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId)
+        && isVerifiedOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isVerifiedOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'updatedAt']);
+      allow delete: if false;
+
+      match /workspaces/{workspaceId} {
+        allow get: if isValidId(userId) && isValidId(workspaceId) && isVerifiedOwner(userId);
+        allow list: if isVerifiedOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(workspaceId)
+          && isVerifiedOwner(userId)
+          && isValidWorkspace(incoming(), userId)
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(workspaceId)
+          && isVerifiedOwner(userId)
+          && isValidWorkspace(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'currentDate',
+            'routingMode',
+            'dailyTimeBudgetMinutes',
+            'tools',
+            'tasks',
+            'carryoverLogs',
+            'updatedAt'
+          ]);
+        allow delete: if isValidId(userId) && isValidId(workspaceId) && isVerifiedOwner(userId);
+      }
+
+      match /accounts/{accountId} {
+        allow get: if isValidId(userId) && isValidId(accountId) && isVerifiedOwner(userId);
+        allow list: if isVerifiedOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(accountId)
+          && isVerifiedOwner(userId)
+          && isValidLinkedAccount(incoming(), userId, accountId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(accountId)
+          && isVerifiedOwner(userId)
+          && isValidLinkedAccount(incoming(), userId, accountId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'label',
+            'emailAlias',
+            'toolIds',
+            'notes',
+            'enabled',
+            'updatedAt'
+          ]);
+        allow delete: if isValidId(userId) && isValidId(accountId) && isVerifiedOwner(userId);
+      }
+    }
+  }
+}

@@ -1,0 +1,157 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile storing account metadata.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 254
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "displayName", "createdAt", "updatedAt"]
+    },
+    "UserWorkspace": {
+      "title": "UserWorkspace",
+      "description": "Personal RelayFlow workspace containing AI tool pools (Web + App), tasks, and carryover logs.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "currentDate": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 20
+        },
+        "routingMode": {
+          "type": "string",
+          "enum": ["strength_first", "quota_balanced", "urgency_first"]
+        },
+        "dailyTimeBudgetMinutes": {
+          "type": "integer"
+        },
+        "tools": {
+          "type": "array"
+        },
+        "tasks": {
+          "type": "array"
+        },
+        "carryoverLogs": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "currentDate",
+        "routingMode",
+        "dailyTimeBudgetMinutes",
+        "tools",
+        "tasks",
+        "carryoverLogs",
+        "updatedAt"
+      ]
+    },
+    "LinkedAccount": {
+      "title": "LinkedAccount",
+      "description": "Additional personal AI account profile used to expand tool coverage and stack daily free credits.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "emailAlias": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "toolIds": {
+          "type": "array"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "label",
+        "emailAlias",
+        "toolIds",
+        "notes",
+        "enabled",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile document keyed by Firebase Auth UID."
+    },
+    "/users/{userId}/workspaces/{workspaceId}": {
+      "schema": { "$ref": "#/entities/UserWorkspace" },
+      "description": "Personal AI orchestration state synced across devices for the signed-in user."
+    },
+    "/users/{userId}/accounts/{accountId}": {
+      "schema": { "$ref": "#/entities/LinkedAccount" },
+      "description": "Linked AI service login profiles for expanding available tools and daily credit capacity."
+    }
+  }
+}

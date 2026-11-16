@@ -1,0 +1,6 @@
+{
+  "name": "RelayFlow — 多 AI 接力與免費額度排程工作台",
+  "description": "整合各大 AI 工具模型強項的接力任務工作台，提供每日免費額度管理、自動分流排程與未完成任務跨日暫存重排功能。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
